@@ -1359,7 +1359,13 @@ async function runSession(ws, req, lifecycle) {
                 const liveFp = await page.evaluate(() => document.body.getElementsByTagName('*').length - document.body.querySelectorAll('script, noscript, template, [data-xy-space]').length);
                 // v0.56 口径：实时数与快照基准差在 5% 内（轮询正常演进）用快照基准；
                 // 大跳变（导航/大块渲染）仍用实时数
-                const srvFp = (lastSnapServerEls !== null && Math.abs(liveFp - lastSnapServerEls) <= liveFp * 0.05) ? lastSnapServerEls : liveFp;
+                // v0.86: live 与快照基准差 >5% = 页面自身剧烈演化中（骨架↔列表
+                // 切换/流式渲染，/projects 实测 live=5140 snapBase=245 震荡）——补丁
+                // 通道在追，拿 live 判镜像漂移必然误伤（镜像永远落后一个补丁 RTT，
+                // self-heal 全量重拍循环 = "一直刷新"根因之二）。漂移检测只对
+                // "页面静止（live≈snapBase）但镜像没跟上"的场景有意义
+                if (lastSnapServerEls !== null && Math.abs(liveFp - lastSnapServerEls) > liveFp * 0.05) break;
+                const srvFp = (lastSnapServerEls !== null) ? lastSnapServerEls : liveFp;
                 const drift = Math.abs(srvFp - m.fp);
                 // v0.77：阈值 2%→8%（下限 4）+ streak≥3 + 30s 间隔——轮询/流式
                 // 页（beacon 事件列表 7↔8 行震荡）补丁在途滞后即假漂移，旧参数
@@ -1978,7 +1984,7 @@ async function runSession(ws, req, lifecycle) {
           if (!rest.length) return;
             if (rest.some(p => p && p.full)) {
               const whys = patches.filter(p => p && p.full).map(p => p.why || '?');
-              const headOnly = whys.length > 0 && whys.every(w => /noPath:(HEAD|STYLE)/.test(w));
+              const headOnly = whys.length > 0 && whys.every(w => /noPath:(HEAD|STYLE|TITLE|META|LINK|BASE)/.test(w));
               if (headOnly) {
                 // 同样式集合的纯 churn 直接丢弃；变了才全量（15s 地板，churn 周期
                 // 重试 + 尾部兜底保证终态一致；body 内容由补丁通道持续保鲜）

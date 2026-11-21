@@ -1767,12 +1767,17 @@ function buildMirror(css, html, docClass, docAttrs, newBodyId, bodyStyle) {
       // 与打字/值回填形成竞态（实测值被打乱成 "sescac-loped"）。打字时用户即
       // 权威（frame 模式输入框穿孔本地原生渲染；dom 模式瓦片随值隐藏），
       // 失焦后统一补挂（v0.12：按 DOM contains 判定目标与焦点的关系）
+      // v0.86: 挂起范围收窄——只挂「焦点元素自身的值类补丁（text/tile/整段
+      // 替换）」与「替换会销毁焦点元素的结构补丁」。祖先容器的 attrs/text 补丁
+      // 既不动焦点也不改输入值，此前 target0.contains(ae) 连祖先动画类一起挂起
+      // → 聚焦输入期间页面过渡全冻结（新建对话输入框衔接动画丢失的成分之一）
       if (aeActive) {
-        const target0 = mirrorFind(p.id !== undefined ? p.id : p.path);
-        if (target0 && (target0 === ae || target0.contains(ae) || ae.contains(target0))) {
-          pendingFocusPatches.push(p);
-          continue;
-        }
+        const structural0 = p.inner !== undefined || p.outer !== undefined || p.kidKeep !== undefined || p.delHead !== undefined || p.delTail !== undefined || (p.append !== undefined && p.tile === undefined && p.selTile === undefined && p.text === undefined);
+        const t0p = mirrorFind(p.id !== undefined ? p.id : p.path);
+        const hits = t0p && (t0p === ae
+          ? (structural0 || p.text !== undefined || p.tile !== undefined || p.selTile !== undefined)
+          : (structural0 && (t0p.contains(ae) || ae.contains(t0p))));
+        if (hits) { pendingFocusPatches.push(p); continue; }
       }
       try {
         // 像素瓦片补丁（v3 元素锚定）：瓦片作为元素背景落在镜像文档流里，
@@ -2655,7 +2660,7 @@ el.style.color = 'transparent'; el.style.textShadow = 'none';
             // 过期，补丁路径会碰撞错位（瓦片落到错误元素）而不报 path miss——
             // 用元素数漂移检测并请求全量重同步（10s 限频）
             if (j.els && mirrorBody) {
-              const mine = mirrorBody.querySelectorAll('*').length;
+              const mine = mirrorBody.querySelectorAll(':not(template)').length; // v0.86 口径对齐：声明式 shadow 模板客户端计入、服务端 :not(template) 剔除——恒差致每 10s 误触全量
               const drift = Math.abs(j.els - mine);
               if (drift > Math.max(8, j.els * 0.05) && Date.now() - lastFpResync > 10000) {
                 lastFpResync = Date.now();
