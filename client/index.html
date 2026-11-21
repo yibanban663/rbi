@@ -1783,6 +1783,9 @@ function buildMirror(css, html, docClass, docAttrs, newBodyId, bodyStyle) {
           const t = p.tile || p.selTile;
           const bg = 'url("' + t.url + '")';
           el.style.backgroundImage = bg;
+// v0.85 fix: tile=server pixels, hide original text to prevent double-render
+el.setAttribute('data-xy-bg', bg);
+el.style.color = 'transparent'; el.style.textShadow = 'none';
           el.style.backgroundSize = (t.cssW || t.w) + 'px ' + (t.cssH || t.h) + 'px';
           el.style.backgroundPosition = '0 0';
           el.style.backgroundRepeat = 'no-repeat';
@@ -2313,7 +2316,7 @@ function buildMirror(css, html, docClass, docAttrs, newBodyId, bodyStyle) {
                 // 滚动几何锁定：高度=服务端页高 + overflow:hidden（代理 DOM 自然高度
                 // 与服务端有 1-3px 布局漂移，会撑大 scrollHeight → 触底时客户端
                 // 比服务端多滚 1px，全页内容错位）。代理溢出部分本就被画布盖住不可见
-                if (mirrorBody) { mirrorBody.style.height = frame.pageH + 'px'; mirrorBody.style.overflow = 'hidden'; }
+                if (mirrorBody) { mirrorBody.style.height = frame.pageH + 'px'; mirrorBody.style.overflow = 'auto'; }
               }
               // 内部滚动容器初始位置对齐（快照时的服务端滚动状态）
               if (Array.isArray(j.scrollers)) {
