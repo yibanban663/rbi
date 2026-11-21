@@ -1575,13 +1575,15 @@ async function runSession(ws, req, lifecycle) {
             // 元素执行 el.click()——与源站直连的程序化点击同语义
             noteInput();
             try {
-              await page.evaluate((id) => {
+              const dcRes = await page.evaluate((id) => {
                 try {
                   let el = window.__xy ? window.__xy.find(id) : null;
                   if (el && el.nodeType === 3) el = el.parentElement;
-                  if (el && el.click) el.click();
-                } catch (e) {}
-              }, m.id).catch(() => {});
+                  if (el && el.click) { el.click(); return 'OK:' + el.tagName; }
+                  return 'MISS';
+                } catch (e) { return 'ERR:' + e.message; }
+              }, m.id).catch((e) => 'REJ:' + e.message);
+              try { logger.log('[dbg] domclick id=' + m.id + ' -> ' + dcRes); } catch (e2) {}
             } catch (e) {}
             break;
           }
