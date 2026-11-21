@@ -2717,6 +2717,19 @@ el.style.color = 'transparent'; el.style.textShadow = 'none';
       ws.send(JSON.stringify(base));
     }
   }, 1000);
+  // v0.87: 后台标签页保活——浏览器对隐藏标签的 setInterval 节流(可降至 1 次/分)曾使
+  // 会话 15s 无 pong 被服务端收割，切回面板即重连+重放快照 = 用户可感知的"一直重绘"
+  // （内置浏览器切换面板时整个渲染器挂起同理）。专用 Worker 的定时器不受标签可见性
+  // 节流，隐藏期间由它维持 1s 心跳；可见时让位给上面的全功能 ping（带 fp/rum）
+  try {
+    const __xyWk = new Worker(URL.createObjectURL(new Blob(["setInterval(function(){postMessage(1)},1000)"], { type: "text/javascript" })));
+    __xyWk.onmessage = () => {
+      if (document.visibilityState === 'visible') return;
+      if (connected && ws && ws.readyState === 1) {
+        try { ws.send(JSON.stringify({ type: 'ping', t: performance.now() })); } catch (e) {}
+      }
+    };
+  } catch (e) {}
 
   document.querySelectorAll('.quality button[data-m]').forEach(b => b.addEventListener('click', () => {
     if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'mode', mode: b.dataset.m }));

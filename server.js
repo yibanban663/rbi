@@ -1419,6 +1419,15 @@ async function runSession(ws, req, lifecycle) {
           case 'mode': {
             // dom（真文本镜像，默认）↔ frame（像素直出兜底）双向可切
             const next = ['dom', 'frame', 'dl'].includes(m.mode) ? m.mode : 'dom';
+            // v0.87: 同模式 mode 重同步地板——陈旧客户端（v0.86 前的 els 口径把
+            // shadow 模板计入元素数）每 10s 发 mode 触发全量重拍 = 整树重建循环
+            // （用户视角"一直重绘"）。真实模式切换（next!==mode）与首次同步不受
+            // 影响；同模式重同步最快 30s 一次，陈旧客户端的循环被打断，漂移由
+            // 30s 一次的慢速重同步收敛
+            if (next === mode && (mode === 'dom' || mode === 'frame') && Date.now() - lastFullDoneAt < 30000) {
+              sendJson({ type: 'mode', mode });
+              break;
+            }
             // frame → dom：帧差分循环与帧流必须死亡（dom 无帧率不变式）
             if (mode === 'frame' && next !== 'frame') {
               if (diffTimer) { clearInterval(diffTimer); diffTimer = null; }
