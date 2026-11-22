@@ -1717,6 +1717,65 @@ function buildMirror(css, html, docClass, docAttrs, newBodyId, bodyStyle) {
     while (srcParent.firstChild) el.appendChild(srcParent.firstChild);
     registerSubtree(el);
   }
+  // v0.95 FLIP 布局过渡：布局模式切换（欢迎态居中 → 控制台态底栏）是 flex 布局
+  // 位置变化，CSS transition 无法插值 → 镜像里表现为"瞬移/乱动"（实测输入框
+  // 60ms→120ms 跳 354px，源站用 mt-settle-down keyframes 平滑）。在补丁前后各记
+  // 一次位置，对位移显著且仍存活的元素做 transform 反偏移再动画归零（FLIP）。
+  function flipCapture() {
+    const out = new Map();
+    try {
+      if (!mirrorBody) return out;
+      const vw = window.innerWidth, vh = window.innerHeight;
+      let n = 0;
+      for (const el of mirrorBody.querySelectorAll('[data-xy-id]')) {
+        if (n >= 400) break;
+        const r = el.getBoundingClientRect();
+        if (r.width < 4 || r.height < 4) continue;
+        if (r.bottom < -200 || r.top > vh + 200) continue;
+        const id = el.getAttribute('data-xy-id');
+        if (!id) continue;
+        out.set(id, { x: r.left, y: r.top, w: r.width });
+        n++;
+      }
+    } catch (e) {}
+    return out;
+  }
+  function flipPlay(prev, scrollDY) {
+    try {
+      if (!mirrorBody || !prev || !prev.size) return;
+      const vh = window.innerHeight;
+      let n = 0;
+      for (const el of mirrorBody.querySelectorAll('[data-xy-id]')) {
+        if (n >= 200) break;
+        const id = el.getAttribute('data-xy-id');
+        const p0 = id && prev.get(id);
+        if (!p0) continue;
+        if (el.tagName === 'CANVAS' || el.tagName === 'IMG' || el.tagName === 'VIDEO') continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 4 || r.height < 4) continue;
+        if (r.bottom < -100 || r.top > vh + 100) continue;
+        let dx = p0.x - r.left;
+        let dy = p0.y - r.top + (scrollDY || 0);
+        if (Math.abs(dx) < 4 && Math.abs(dy) < 4) continue;
+        if (Math.abs(dx) > 900 || Math.abs(dy) > 900) continue; // 页面切换级位移不做（避免全页飞入）
+        const keepTf = el.style.transform;
+        el.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+        el.style.willChange = 'transform';
+        requestAnimationFrame(() => {
+          el.style.transition = 'transform 200ms cubic-bezier(.2,.8,.2,1)';
+          el.style.transform = keepTf || '';
+          const done = () => {
+            el.style.transition = '';
+            el.style.willChange = '';
+            if (keepTf) el.style.transform = keepTf;
+          };
+          el.addEventListener('transitionend', done, { once: true });
+          setTimeout(done, 320);
+        });
+        n++;
+      }
+    } catch (e) {}
+  }
   function morphMirror(css, html, docClass, docAttrs, newBodyId, bodyStyle) {
     try {
       if (!mirrorRoot || !mirrorBody) return false;
@@ -1865,6 +1924,9 @@ function buildMirror(css, html, docClass, docAttrs, newBodyId, bodyStyle) {
   }
   function applyPatches(patches, noRepair) {
     if (!mirrorBody) return;
+    // v0.95：布局过渡补偿——记录前态（含滚动位置，回放时扣除滚动位移）
+    let flipPrev = null, flipSY0 = 0;
+    try { const msF = document.getElementById('mirrorScroll'); flipSY0 = msF ? msF.scrollTop : 0; flipPrev = flipCapture(); } catch (eF) {}
     const dpr = window.devicePixelRatio || 1;
     let batchMiss = 0;
     const rebound = [];
@@ -2104,6 +2166,14 @@ el.style.color = 'transparent'; el.style.textShadow = 'none';
         const el2 = aeId !== null ? mirrorFind(aeId) : null;
         if (el2 && el2.focus && mirrorRoot.activeElement !== el2) el2.focus();
       } catch (e) {}
+    }
+    // v0.95：差异回放（下一帧，避免与本次 DOM 变更同帧）
+    if (flipPrev && flipPrev.size) {
+      try {
+        const msF2 = document.getElementById('mirrorScroll');
+        const dy = (msF2 ? msF2.scrollTop : 0) - flipSY0;
+        requestAnimationFrame(() => flipPlay(flipPrev, dy));
+      } catch (eF2) {}
     }
     noteFrame(0);
   }
