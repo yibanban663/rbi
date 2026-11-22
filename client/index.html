@@ -2437,7 +2437,14 @@ el.style.color = 'transparent'; el.style.textShadow = 'none';
                   }
                 } catch (e) {}
               }
-              if (el && el.tagName === 'IMG') { el.src = j.url; rumApplied(); }
+              if (el && el.tagName === 'IMG') {
+                // v0.91: 预解码落位——img.src 直换在解码完成前有一帧空窗（动画帧流
+                // 下=持续闪烁）。离屏解码完成后再落位（缓存命中，零空窗）
+                const preI = new Image();
+                preI.onload = preI.onerror = () => { try { el.src = j.url; } catch (eP) {} };
+                preI.src = j.url;
+                rumApplied();
+              }
               else if (el && el.tagName === 'CANVAS') {
                 // v0.29：指令流画布超预算切换位图——镜像侧把 canvas 原位换成
                 // img（保留 id/class/style 使后续补丁与 tile 继续命中），
@@ -2452,9 +2459,9 @@ el.style.color = 'transparent'; el.style.textShadow = 'none';
                 } catch (e) {}
               }
               else if (el && el.getAttribute && el.getAttribute('data-xy-elbit') === '1') {
-                el.style.backgroundImage = 'url("' + j.url + '")';
-                el.style.backgroundSize = '100% 100%';
-                el.style.backgroundRepeat = 'no-repeat';
+                const preB = new Image();
+                preB.onload = preB.onerror = () => { try { el.style.backgroundImage = 'url("' + j.url + '")'; el.style.backgroundSize = '100% 100%'; el.style.backgroundRepeat = 'no-repeat'; } catch (eP2) {} };
+                preB.src = j.url;
                 rumApplied();
               }
             } catch (e) {}

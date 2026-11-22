@@ -2588,7 +2588,7 @@ async function runSession(ws, req, lifecycle) {
     // 无逐拍截图往返），服务端裁剪到画布区域作为瓦片下发——同浏览器截图互斥与
     // 串行捕获环 ~600ms/轮的限制不再约束动画帧率。流激活期间上层动画叠加画布
     // 置 1px 透明占位（合成流已含其像素），停流后常规瓦片通道自动恢复真值。
-    const ANIM_FPS = Math.min(30, Math.max(2, parseInt(process.env.XY_TILE_ANIM_FPS || '8', 10) || 8));
+    const ANIM_FPS = Math.min(30, Math.max(2, parseInt(process.env.XY_TILE_ANIM_FPS || '4', 10) || 4)); // v0.91: 8→4，动画画布流量减半（实测 95min 128MB）
     // v0.70 帧流源采样 everyNthFrame（默认 4：60fps 源 → 15fps 事件流，再由
     // ANIM_FPS 节流下发）。高刷/省 CPU 场景可调。XY_TILE_ANIM_EVERY_NTH，1-30。
     const ANIM_EVERY_NTH = Math.min(30, Math.max(1, parseInt(process.env.XY_TILE_ANIM_EVERY_NTH ?? '4', 10) || 4));
@@ -2626,6 +2626,15 @@ async function runSession(ws, req, lifecycle) {
             const out = await sharp(buf).extract({ left: cl, top: ct, width: cw, height: ch }).jpeg({ quality: ANIM_QUALITY }).toBuffer();
             const b64 = out.toString('base64');
             const pl = JSON.stringify({ type: 'canvas-tile', id: scTarget.id, path: scTarget.path, x: Math.round(scTarget.x), y: Math.round(scTarget.y), w: Math.round(scTarget.w), h: Math.round(scTarget.h), url: 'data:image/jpeg;base64,' + b64 });
+            // v0.91: 帧流接入字节预算——scStart 通道此前绕过 TILE_BUDGET（动画页
+            // 8fps×15-60KB 实测 120-480KB/s，95min 会话 128MB=卡顿主源）。超预算
+            // 本帧丢弃（帧流丢帧无害，画面降频而非卡死）
+            {
+              const nb2 = Date.now();
+              while (tileBytes.length && nb2 - tileBytes[0].t > 60000) tileBytes.shift();
+              let tsum2 = 0; for (const tb2 of tileBytes) tsum2 += tb2.b;
+              if (TILE_BUDGET > 0 && tsum2 + pl.length > TILE_BUDGET) return;
+            }
             if (ws.readyState === 1) { ws.send(pl); ws._bytes = (ws._bytes || 0) + pl.length; ws._chunks = (ws._chunks || 0) + 1; tileBytes.push({ t: Date.now(), b: pl.length }); }
             while (tileBytes.length && Date.now() - tileBytes[0].t > 60000) tileBytes.shift();
           } catch (e) {}
