@@ -945,7 +945,10 @@ function handleUpgrade(req, socket, head) {
 
 // ---------- 会话 ----------
 const wsRateLimiter = new Map(); // v0.40 F1：每 IP 会话创建滑窗（ip→时间戳环）
-const sessionStore = new SessionStore({ limit: MAX_SESSIONS, graceMs: SESSION_GRACE_MS });
+// v0.88 断线宽限：默认 5 分钟（XY_GRACE_MS 可调）。60s 下内置浏览器每次
+// 切面板回来都"会话过期+重登+整页重绘"——resume 机制形同虚设
+const GRACE_MS = Number(process.env.XY_GRACE_MS) || Math.max(SESSION_GRACE_MS, 300000);
+const sessionStore = new SessionStore({ limit: MAX_SESSIONS, graceMs: GRACE_MS });
 const sessionLifecycles = new WeakMap();
 const socketIdentities = new WeakMap();
 let sessions = 0;
@@ -1224,9 +1227,11 @@ async function runSession(ws, req, lifecycle) {
   let xframeTimer = null; // v0.26 跨源 iframe 周期刷新（变化推 outer 补丁）
   let cleanupPromise;
   let cancelHello = () => {};
+  let graceT = null;
   const cleanup = () => {
     if (cleanupPromise) return cleanupPromise;
     dead = true;
+    if (graceT) { clearTimeout(graceT); graceT = null; }
     cancelHello();
     if (idleEvictT) { clearTimeout(idleEvictT); idleEvictT = null; } // v0.39 逐出定时器
     timers.clear();
@@ -1259,7 +1264,13 @@ async function runSession(ws, req, lifecycle) {
   };
   cleanups.add(cleanup);
   lifecycle.cleanup = cleanup;
-  ws.on('close', () => { cleanup(); if (XY_A_ROUTE) skpBridge.stop(); }); // A-route
+  ws.on('close', () => { if (XY_A_ROUTE) skpBridge.stop(); // A-route
+    // v0.88: 断线不立即拆台——页面/上下文/登录态保留到宽限期末，期间 resume
+    // 原位复活（免重登免整页重绘）；到期 graceT 触发真正的 cleanup。收割器
+    // terminate 后也走这里。宽限期停掉 120ms 画布捕获循环省 CPU
+    try { if (canvasTimer) { clearInterval(canvasTimer); canvasTimer = null; } } catch (e) {}
+    if (!dead && !graceT) graceT = setTimeout(() => { graceT = null; try { cleanup(); } catch (e2) {} }, GRACE_MS);
+  });
   ws.on('error', () => {});
   // v0.30 会话活性探测：浏览器页销毁后 TCP 半开不触发 close（既有缺陷，
   // 一会话一浏览器时靠 MAX_SESSIONS 冗余掩盖；池化后会占死池位）。
@@ -1279,16 +1290,14 @@ async function runSession(ws, req, lifecycle) {
         closedTicks++;
         if (closedTicks >= 3) {
           logger.log('[sess  ] closed-socket reaped (state=3 x' + closedTicks + 's, close event missed)');
-          try { ws.terminate(); } catch (e) {}
-          cleanup();
+          try { ws.terminate(); } catch (e) {} // v0.88: 宽限链接管回收
         }
         return;
       }
       closedTicks = 0;
       if (Date.now() - lastAliveAt > 15000) {
         logger.log('[sess  ] dead-connection reaped (no pong 15s)');
-        try { ws.terminate(); } catch (e) {}
-        cleanup();
+        try { ws.terminate(); } catch (e) {} // v0.88: 宽限链接管回收
         return;
       }
       try { ws.ping(); } catch (e) {}
@@ -1781,6 +1790,7 @@ async function runSession(ws, req, lifecycle) {
     }
     cmdChain = cmdChain.then(async () => {
       if (dead || ws.readyState !== 1) return;
+      if (graceT) { clearTimeout(graceT); graceT = null; } // v0.88: 认领即取消宽限回收
       const wasEvicted = pageEvicted; // v0.52：evict 后 revive 的 page 上下文全新，不可重放
       if (pageEvicted) { try { await revivePage(); } catch (e) { logger.log('[idle  ] revive fail:', e && e.message); } }
       if (domStarting) await domStarting;
@@ -1815,6 +1825,7 @@ async function runSession(ws, req, lifecycle) {
       // 插入一次 evaluate 往返即稳定通过=窗口极窄）。此处显式让出一拍再重拍
       if (!replayed) { await new Promise((r2) => setTimeout(r2, 25)); await startDomMirror(); }
       sendJson({ type: 'sync-ready' });
+      if ((mode === 'dom' || mode === 'frame') && !canvasTimer) startCanvasWatch(); // v0.88: 宽限期静音的画布捕获重臂
     }).catch(() => ws.close(1011, 'resume failed'));
   });
 
