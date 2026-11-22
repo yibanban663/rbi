@@ -108,7 +108,7 @@
       <div class="cursor" id="cur"></div>
     </div>
     <div class="canvas-box" id="mirrorBox" style="display:none">
-      <div id="mirrorScroll" style="width:1280px;height:800px;overflow:auto;background:#fff;transform:translateZ(0)">
+      <div id="mirrorScroll" style="width:1280px;height:800px;overflow:auto;background:#fff">
         <div id="mirrorHost"></div>
       </div>
     </div>
@@ -1651,9 +1651,17 @@ function buildMirror(css, html, docClass, docAttrs, newBodyId, bodyStyle) {
   // 把镜像容器吸附到整数设备像素：DPR≠1 时 CSS 整数位置可能是半个设备像素（如 22px×1.25=27.5），
   // 不吸附则整个镜像被合成器重采样，瓦片 1:1 前功尽弃
   function snapMirrorToDevice() {
+    // v0.92 双影根因：此函数只在构建/缩放时算一次吸附位移，之后布局漂移
+    // （滚动条出现/字体度量/补丁重排）0.1-0.9px 时位移变成"陈旧分数偏移"——
+    // 合成层(translateZ)落在非整数设备像素上被整层重采样：粗体笔画重影/
+    // 发虚（细体不明显）。CDP 截图取图层自身栅格=清晰，故此前各轮"截图验证
+    // 干净"与用户屏幕观感相反。DOM 模式改为零位移：浏览器对普通绘制做
+    // 亚像素定位，文字恒清晰；frame 像素瓦片层需要 1:1 各向对齐，保留吸附
     try {
-      const dpr = window.devicePixelRatio || 1;
       const el = document.getElementById('mirrorScroll');
+      if (!el) return;
+      if (!frameMode) { el.style.transform = ''; return; }
+      const dpr = window.devicePixelRatio || 1;
       const r = el.getBoundingClientRect();
       const dx = Math.round(r.left * dpr) / dpr - r.left;
       const dy = Math.round(r.top * dpr) / dpr - r.top;
@@ -2153,6 +2161,8 @@ el.style.color = 'transparent'; el.style.textShadow = 'none';
             if (j.mode) setMode(j.mode);
             if (j.prod) {
               // prod 类已在 setMode 前加过（防白闪时序）
+              // v0.92: 清掉旧会话残留的分数位移（双影根因见 snapMirrorToDevice）
+              if (!frameMode) { try { const msTf = document.getElementById('mirrorScroll'); if (msTf) msTf.style.transform = ''; } catch (eTf) {} }
               viewW = j.w || window.innerWidth; viewH = j.h || window.innerHeight;
               const ms = document.getElementById('mirrorScroll');
               if (ms) { ms.style.width = viewW + 'px'; ms.style.height = viewH + 'px'; }
