@@ -1682,6 +1682,41 @@ function buildMirror(css, html, docClass, docAttrs, newBodyId, bodyStyle) {
     registerSubtree(a);
     return true;
   }
+  // v0.94: 补丁路径的原地合并——inner/outer 补丁原为整段 setHTMLUnsafe/replaceWith，
+  // 元素身份被销毁 → 点击触发的 React 重渲染会把过渡动画一并抹掉。改为按
+  // data-xy-id 对齐复用旧节点（原地改属性/文本），仅新增节点插入、消失节点移除
+  function morphChildrenInto(el, srcParent) {
+    const ac = [...el.childNodes], bc = [...srcParent.childNodes];
+    if (morphSeq(ac) === morphSeq(bc)) {
+      for (let i = 0; i < ac.length; i++) {
+        if (!morphNode(ac[i], bc[i])) { unregisterSubtree(ac[i]); ac[i].replaceWith(bc[i]); registerSubtree(bc[i]); }
+      }
+      return;
+    }
+    const oldById = new Map();
+    for (const n of ac) if (n.nodeType === 1) { const id = n.getAttribute('data-xy-id'); if (id) oldById.set(id, n); }
+    let aligned = bc.length > 0;
+    for (const n of bc) {
+      if (n.nodeType !== 1) continue;
+      const id = n.getAttribute('data-xy-id');
+      if (!id || !oldById.has(id)) { aligned = false; break; }
+    }
+    if (aligned) {
+      const keep = new Set();
+      for (const n of bc) {
+        const id = n.nodeType === 1 ? n.getAttribute('data-xy-id') : null;
+        const old = id ? oldById.get(id) : null;
+        if (old) { morphNode(old, n); keep.add(old); el.appendChild(old); }
+        else { el.appendChild(n); registerSubtree(n); }
+      }
+      for (const n of ac) if (!keep.has(n) && n.parentNode === el) { unregisterSubtree(n); n.remove(); }
+      return;
+    }
+    for (const c of ac) unregisterSubtree(c);
+    el.textContent = '';
+    while (srcParent.firstChild) el.appendChild(srcParent.firstChild);
+    registerSubtree(el);
+  }
   function morphMirror(css, html, docClass, docAttrs, newBodyId, bodyStyle) {
     try {
       if (!mirrorRoot || !mirrorBody) return false;
@@ -1983,8 +2018,13 @@ el.style.color = 'transparent'; el.style.textShadow = 'none';
         if (p.inner !== undefined) {
           // frame 模式：body 级补丁会连瓦片图层一起换掉——先摘下再挂回
           const savedLayer = frameMode ? (mirrorBody ? mirrorBody.querySelector('.xy-tiles') : null) : null;
-          for (const c of [...el.children]) unregisterSubtree(c);
-          if (typeof el.setHTMLUnsafe === 'function') el.setHTMLUnsafe(scrubHtml(p.inner)); else el.innerHTML = scrubHtml(p.inner);
+          // v0.94: 原地合并（保留同 id 元素身份 → CSS 过渡/动画继续）
+          {
+            const tmpIn = document.createElement('div');
+            const cleanIn = scrubHtml(p.inner);
+            if (typeof tmpIn.setHTMLUnsafe === 'function') tmpIn.setHTMLUnsafe(cleanIn); else tmpIn.innerHTML = cleanIn;
+            morphChildrenInto(el, tmpIn);
+          }
           // v0.28 elbit：宿主获得真实内容后清除位图叠加与 min 尺寸（真实内容自行撑盒）
           if (el.getAttribute && el.getAttribute('data-xy-elbit') === '1' && el.children.length) {
             el.style.backgroundImage = '';
@@ -1999,9 +2039,14 @@ el.style.color = 'transparent'; el.style.textShadow = 'none';
           const nodes = parseHtml(p.outer);
           const next = nodes[0];
           if (!next || nodes.length !== 1) throw new Error('outer parse');
-          unregisterSubtree(el);
-          el.replaceWith(next);
-          registerSubtree(next);
+          // v0.94: 同标签 → 原地 morph（元素身份保留，过渡可播）；异标签/影子模板 → 替换
+          if (next.nodeType === 1 && el.nodeType === 1 && next.tagName === el.tagName && !el.shadowRoot && !next.querySelector('template[shadowrootmode]')) {
+            morphNode(el, next);
+          } else {
+            unregisterSubtree(el);
+            el.replaceWith(next);
+            registerSubtree(next);
+          }
         }
       } catch (e) {
         // v0.37 id 解析失败三级处理：
