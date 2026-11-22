@@ -2304,7 +2304,8 @@ async function runSession(ws, req, lifecycle) {
     const cssFixed = snap.css + obfCssBlock;
     const cssSame = (lastCssSent !== null && lastCssSent === cssFixed);
     if (!cssSame) lastCssSent = cssFixed;
-    const payload = JSON.stringify(Object.assign({ type: 'dom-snapshot', ep: snapEpoch + 1, css: cssSame ? undefined : cssFixed, cssSame: cssSame || undefined, html: snap.html, title: snap.title, w: viewW, h: viewH, tiles: snap.tiles || [], frame: snap.frame || null, docClass: snap.docClass || '', docAttrs: snap.docAttrs || '', bodyStyle: snap.bodyStyle || '', sx: snap.sx || 0, sy: snap.sy || 0, scrollers: snap.scrollers || [], bodyId: snap.bodyId }));
+    let snapPath0 = ''; try { snapPath0 = mirrorSafeUrl(page.url()); } catch (eP) {}
+    const payload = JSON.stringify(Object.assign({ type: 'dom-snapshot', ep: snapEpoch + 1, path: snapPath0, css: cssSame ? undefined : cssFixed, cssSame: cssSame || undefined, html: snap.html, title: snap.title, w: viewW, h: viewH, tiles: snap.tiles || [], frame: snap.frame || null, docClass: snap.docClass || '', docAttrs: snap.docAttrs || '', bodyStyle: snap.bodyStyle || '', sx: snap.sx || 0, sy: snap.sy || 0, scrollers: snap.scrollers || [], bodyId: snap.bodyId }));
     ws.send(payload);
     ws._bytes = (ws._bytes || 0) + payload.length;
     ws._chunks = (ws._chunks || 0) + 1;

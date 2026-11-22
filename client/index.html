@@ -673,6 +673,7 @@
   // lastSnapKey，后续同内容快照命中去重跳过重建（否则入口动画重放=刷新闪一下）
   let snapshotReady = false, syncReady = false, snapshotSerial = 0, lastSnapKey = null;
   let mirrorEpoch = 0; // v0.89 补丁时栅：快照换代，旧代在途补丁作废（resume 风暴防重复内容）
+  let lastSnapPath = null; // v0.93: 最近一次快照的路径（morph 仅在同路径生效）
   let lastSnapData = null, lastSnapSaveAt = 0;
   let syncWatchdog = null; // v0.53：'session' 后同步看门狗（静默卡死兜底）
   let lastFpResync = 0; // 结构指纹重同步限频
@@ -1648,6 +1649,72 @@ function buildMirror(css, html, docClass, docAttrs, newBodyId, bodyStyle) {
       } catch (e) {}
     }
   }
+
+  // v0.93 快照原地 morph：整树重建会让所有元素变成新节点——CSS transition 需要
+  // 同一元素的状态变化才播放，换节点=直接终态（用户实测"点击过渡动画丢失"：
+  // 源站 background-color/box-shadow 过渡在镜像里没有）。改为按 data-xy-id /
+  // 文本序对齐，原地更新属性与文本，仅结构真变化处替换节点：元素身份保住，
+  // 过渡与动画得以继续。
+  function morphAttrs(a, b) {
+    try {
+      for (const at of [...a.attributes]) if (!b.hasAttribute(at.name)) a.removeAttribute(at.name);
+      for (const at of [...b.attributes]) if (a.getAttribute(at.name) !== at.value) a.setAttribute(at.name, at.value);
+    } catch (e) {}
+  }
+  function morphSeq(nodes) {
+    return nodes.map(n => n.nodeType === 1 ? ('#' + (n.getAttribute('data-xy-id') || '?')) : ('t' + n.nodeType)).join('|');
+  }
+  function morphNode(a, b) {
+    if (a.nodeType === 3) { if (a.nodeValue !== b.nodeValue) a.nodeValue = b.nodeValue; return; }
+    if (a.nodeType !== 1 || b.nodeType !== 1 || a.tagName !== b.tagName) return false;
+    morphAttrs(a, b);
+    // 影子/模板结构变化不可原地合并：交给上层整体替换
+    if (a.shadowRoot || b.querySelector('template[shadowrootmode]')) return false;
+    const ac = [...a.childNodes], bc = [...b.childNodes];
+    if (morphSeq(ac) === morphSeq(bc)) {
+      for (let i = 0; i < ac.length; i++) if (!morphNode(ac[i], bc[i])) { unregisterSubtree(ac[i]); ac[i].replaceWith(bc[i]); registerSubtree(bc[i]); }
+      return true;
+    }
+    // 结构序列不同：整段子节点替换（此层过渡会丢，但上层元素身份已保住）
+    for (const c of ac) unregisterSubtree(c);
+    a.textContent = '';
+    while (b.firstChild) a.appendChild(b.firstChild);
+    registerSubtree(a);
+    return true;
+  }
+  function morphMirror(css, html, docClass, docAttrs, newBodyId, bodyStyle) {
+    try {
+      if (!mirrorRoot || !mirrorBody) return false;
+      const holder = document.createElement('div');
+      const wrapped = '<div class="xy-body ' + (docClass || '') + '" ' + (docAttrs || '') + '>' + html + '</div>';
+      if (typeof holder.setHTMLUnsafe === 'function') holder.setHTMLUnsafe(wrapped); else holder.innerHTML = wrapped;
+      const nb = holder.firstElementChild;
+      if (!nb) return false;
+      // 样式段更新（样式不参与过渡，整段替换）
+      if (css != null) {
+        try {
+          const CSS_SEG = '\n\u002f' + '*' + '__xy_css_segment_v76__' + '*' + '\u002f\n';
+          const css2 = String(css)
+            .replace(/:root(?=[\[{.,:\s)])/g, '.xy-body')
+            .replace(/(^|[\s,{}>+~])html(?=[\[{.,:\s)])/g, '$1.xy-body')
+            .replace(/(^|[\s,{}>+~])body(?=[\[{.,:\s)])/g, '$1.xy-body');
+          const segs = css2.split(CSS_SEG);
+          const tags = segs.length > 1 ? segs.map((s) => '<style>' + s + '</style>').join('') : ('<style>' + css2 + '</style>');
+          for (const st of [...mirrorRoot.querySelectorAll(':scope > style')]) st.remove();
+          const tmp = document.createElement('div');
+          tmp.innerHTML = tags;
+          while (tmp.firstChild) mirrorRoot.insertBefore(tmp.firstChild, mirrorRoot.firstChild);
+        } catch (eCss) {}
+      }
+      morphNode(mirrorBody, nb);
+      mirrorBody.className = nb.className;
+      if (bodyStyle) { try { mirrorBody.style.cssText = nb.style.cssText + ';' + bodyStyle; } catch (eS) {} }
+      if (typeof newBodyId === 'number' && Number.isFinite(newBodyId)) { bodyId = newBodyId; mirrorIds.set(newBodyId, mirrorBody); }
+      syncDocScrollerStyle();
+      return true;
+    } catch (e) { return false; }
+  }
+
   // 把镜像容器吸附到整数设备像素：DPR≠1 时 CSS 整数位置可能是半个设备像素（如 22px×1.25=27.5），
   // 不吸附则整个镜像被合成器重采样，瓦片 1:1 前功尽弃
   function snapMirrorToDevice() {
@@ -2245,6 +2312,7 @@ el.style.color = 'transparent'; el.style.textShadow = 'none';
               return;
             }
             if (!j.frame) lastSnapKey = snapKey;
+            lastSnapPath = j.path || null; // v0.93
             const serial = ++snapshotSerial;
             snapshotReady = false;
             noteBytes(ev.data.length || ev.data.size || 0);
@@ -2279,7 +2347,11 @@ el.style.color = 'transparent'; el.style.textShadow = 'none';
               // 丢弃它会让下次服务端 cssSame 省略时回退到 null → buildMirror(null)
               // 抛 TypeError → 导航回流快照渲染中断、镜像冻结旧页（实测根因）
               if (css != null) lastCss = css;
-              buildMirror(css, j.html, j.docClass, j.docAttrs, j.bodyId, j.bodyStyle);
+              // v0.93: 已有镜像且同路径 → 原地 morph（元素身份保留，CSS 过渡/动画
+              // 不被整树重建打断）；首次构建或 morph 不适用才整树重建
+              let morphed = false;
+              try { if (mirrorBody && lastSnapPath === j.path) morphed = morphMirror(css, j.html, j.docClass, j.docAttrs, j.bodyId, j.bodyStyle); } catch (eM) { morphed = false; }
+              if (!morphed) buildMirror(css, j.html, j.docClass, j.docAttrs, j.bodyId, j.bodyStyle);
               // v0.75 语义恢复：快照就绪=镜像已构建，online/交互通道立即恢复。
               // v0.76 首版曾把 import 等待插在 snapshotReady 之前——慢环境下
               // availability 迟迟不置位，期间 send() 静默丢弃一切输入（实测
