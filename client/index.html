@@ -672,6 +672,7 @@
   // v0.53 F5 零空窗：快照状态提升到模块域——首帧缓存渲染要在 connect 前置位
   // lastSnapKey，后续同内容快照命中去重跳过重建（否则入口动画重放=刷新闪一下）
   let snapshotReady = false, syncReady = false, snapshotSerial = 0, lastSnapKey = null;
+  let mirrorEpoch = 0; // v0.89 补丁时栅：快照换代，旧代在途补丁作废（resume 风暴防重复内容）
   let lastSnapData = null, lastSnapSaveAt = 0;
   let syncWatchdog = null; // v0.53：'session' 后同步看门狗（静默卡死兜底）
   let lastFpResync = 0; // 结构指纹重同步限频
@@ -1804,6 +1805,23 @@ el.style.color = 'transparent'; el.style.textShadow = 'none';
         }
         const el = mirrorFind(p.id !== undefined ? p.id : p.path);
         if (!el) throw new Error('id miss');
+        // v0.89 平移/kidKeep 基线守卫：ph=服务端认定的本容器子元素指纹。失配
+        // =镜像实际子元素与服务端信念分叉（repair/断线风暴历史遗留）——按
+        // delta 硬套会删错行/复用错行（列表行叠两份不同内容的根因）。失配
+        // 即弃用 delta，走 repair（父级 inner 绝对替换）精确自愈
+        if (p.ph !== undefined && (p.delHead !== undefined || p.delTail !== undefined || p.kidKeep !== undefined)) {
+          let phOk = false;
+          try {
+            let h = 0; const s = [...el.children].map(c => c.outerHTML.replace(/ data-xy-id="\d+"/g, '')).join('');
+            for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+            phOk = (h === p.ph);
+          } catch (e3) {}
+          if (!phOk) {
+            if (!p.__phRetry && p.id !== undefined && Number.isInteger(p.id)) repairPending.add(p.id);
+            batchMiss++;
+            continue;
+          }
+        }
         // v0.24 LCS 子序列编辑脚本：kidKeep=保留的旧子元素索引（升序），
         // kidIns=[新序位置, html]，kidTotal=新子元素数。按新序重排并**复用**
         // 保留节点（不重建）；任何校验失败按 patch-miss 走重同步（宁重不错）
@@ -2192,6 +2210,7 @@ el.style.color = 'transparent'; el.style.textShadow = 'none';
           }
           try { if (j.type === 'dom-snapshot') navProgressDone(); } catch (e) {}
           if (j.type === 'dom-snapshot') {
+            if (j.ep !== undefined) mirrorEpoch = j.ep; // v0.89: 采纳新时栅（去重路径同样换代）
             // 同内容快照去重：服务端导航后 +600ms/+1500ms 兜底重拍在静态页上产出
             // 字节级相同的快照，整树重建=整页闪动（"每个页面像刷新了 3 次"的直接
             // 来源）。css+html 与上一次已应用快照一致时跳过重建，仅跟随滚动/标题。
@@ -2350,7 +2369,9 @@ el.style.color = 'transparent'; el.style.textShadow = 'none';
             m('oTitle').textContent = j.title || '-';
             m('mIdle').textContent = 'mirror';
           }
-          if (j.type === 'dom-patches') { noteBytes(ev.data.length || ev.data.size || 0); rum.patches += (j.patches || []).length; applyPatches(j.patches); rumApplied(); }
+          if (j.type === 'dom-patches') { noteBytes(ev.data.length || ev.data.size || 0);
+            if (j.ep !== undefined && j.ep < mirrorEpoch) { /* v0.89: 旧代补丁打在已换代的树上=重复内容源，丢弃 */ }
+            else { rum.patches += (j.patches || []).length; applyPatches(j.patches); rumApplied(); } }
           if (j.type === 'pixel-skin') {
             // v0.48 像素蒙皮：服务端截图覆盖镜像 DOM 之上——文字视觉 100%（服务端
             // Linux 光栅化位图），DOM 层在下面正常处理交互（pointer-events:none）

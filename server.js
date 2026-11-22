@@ -1264,10 +1264,12 @@ async function runSession(ws, req, lifecycle) {
   };
   cleanups.add(cleanup);
   lifecycle.cleanup = cleanup;
-  ws.on('close', () => { if (XY_A_ROUTE) skpBridge.stop(); // A-route
-    // v0.88: 断线不立即拆台——页面/上下文/登录态保留到宽限期末，期间 resume
-    // 原位复活（免重登免整页重绘）；到期 graceT 触发真正的 cleanup。收割器
-    // terminate 后也走这里。宽限期停掉 120ms 画布捕获循环省 CPU
+  // v0.90 修正：v0.88 把宽限挂在了 session 'close'（终局事件）——socket 断开
+  // 实际发的是 'detach'（SessionStore.attach 内 socket.once('close') → emit），
+  // 导致宽限从未接管、终局清理也不跑，resume 管线半死 → SESSION_BUSY 死循环。
+  // 现在拆开：detach（socket断）→ 宽限；close（终局）→ 立即 cleanup
+  ws.on('close', () => { try { cleanup(); } catch (eC) {} }); // 终局：store过期/撤销/关停
+  ws.on('detach', () => { if (XY_A_ROUTE) skpBridge.stop(); // A-route
     try { if (canvasTimer) { clearInterval(canvasTimer); canvasTimer = null; } } catch (e) {}
     if (!dead && !graceT) graceT = setTimeout(() => { graceT = null; try { cleanup(); } catch (e2) {} }, GRACE_MS);
   });
@@ -1485,7 +1487,7 @@ async function runSession(ws, req, lifecycle) {
                 const full = patches.some((p2) => p2.full);
                 const real = patches.filter((p2) => !p2.full && p2.id !== undefined && typeof p2.inner === 'string');
                 if (real.length && ws.readyState === 1) {
-                  const pl = JSON.stringify({ type: 'dom-patches', patches: real });
+                  const pl = JSON.stringify({ type: 'dom-patches', patches: real, ep: snapEpoch }); // v0.89
                   ws.send(pl);
                   ws._bytes = (ws._bytes || 0) + pl.length;
                   ws._chunks = (ws._chunks || 0) + 1;
@@ -1832,6 +1834,8 @@ async function runSession(ws, req, lifecycle) {
 
   // ---------- DOM 镜像通道 ----------
   let domActive = false, domExposed = false;
+  let snapEpoch = 0; // v0.89 补丁时栅：每次全量快照换代+1；客户端据此丢弃
+  // 打在旧树上的在途补丁（resume 风暴窗口曾把旧代 append 落到新树=重复内容
   let DPR = 1;
   let viewW = VIEW_W, viewH = VIEW_H;
   let pendingFrame = null, lastFrameAt = 0, lastFrameAt2 = 0; // 合成器帧回调缓存（编码-解码范式帧源）
@@ -1996,12 +2000,12 @@ async function runSession(ws, req, lifecycle) {
           const appendPatches = patches.filter(p => p && p.append !== undefined);
           const textPatches = patches.filter(p => p && p.text !== undefined);
           if ((appendPatches.length || textPatches.length) && domActive && ws.readyState === 1) {
-            sendJson({ type: 'dom-patches', patches: appendPatches.concat(textPatches) });
+            sendJson({ type: 'dom-patches', patches: appendPatches.concat(textPatches), ep: snapEpoch }); // v0.89
           }
           // v0.29：属性补丁 O(1) 直发（不进瓦片批——无 DOM 重读，几十字节）
           const attrsPatches = patches.filter(p => p && p.attrs !== undefined);
           if (attrsPatches.length && domActive && ws.readyState === 1) {
-            sendJson({ type: 'dom-patches', patches: attrsPatches });
+            sendJson({ type: 'dom-patches', patches: attrsPatches, ep: snapEpoch }); // v0.89
           }
           if (!rest.length) return;
             if (rest.some(p => p && p.full)) {
@@ -2300,11 +2304,11 @@ async function runSession(ws, req, lifecycle) {
     const cssFixed = snap.css + obfCssBlock;
     const cssSame = (lastCssSent !== null && lastCssSent === cssFixed);
     if (!cssSame) lastCssSent = cssFixed;
-    const payload = JSON.stringify(Object.assign({ type: 'dom-snapshot', css: cssSame ? undefined : cssFixed, cssSame: cssSame || undefined, html: snap.html, title: snap.title, w: viewW, h: viewH, tiles: snap.tiles || [], frame: snap.frame || null, docClass: snap.docClass || '', docAttrs: snap.docAttrs || '', bodyStyle: snap.bodyStyle || '', sx: snap.sx || 0, sy: snap.sy || 0, scrollers: snap.scrollers || [], bodyId: snap.bodyId }));
+    const payload = JSON.stringify(Object.assign({ type: 'dom-snapshot', ep: snapEpoch + 1, css: cssSame ? undefined : cssFixed, cssSame: cssSame || undefined, html: snap.html, title: snap.title, w: viewW, h: viewH, tiles: snap.tiles || [], frame: snap.frame || null, docClass: snap.docClass || '', docAttrs: snap.docAttrs || '', bodyStyle: snap.bodyStyle || '', sx: snap.sx || 0, sy: snap.sy || 0, scrollers: snap.scrollers || [], bodyId: snap.bodyId }));
     ws.send(payload);
     ws._bytes = (ws._bytes || 0) + payload.length;
     ws._chunks = (ws._chunks || 0) + 1;
-    // v0.52 重放缓存：留一份供 F5/断线 resume 快速重放。先归还本会话旧帧
+    snapEpoch++; // v0.89: 快照已发，后续补丁属新一代
     // 占用的预算，再在全局预算内缓存；超预算（其他会话占满）则放弃缓存，
     // resume 退化为全量——功能无损，仅少一次加速
     if (snapReplay) { snapReplayBytes -= snapReplay.payload.length; snapReplay = null; }
@@ -2402,6 +2406,7 @@ async function runSession(ws, req, lifecycle) {
       // （上移）。命中则发 O(增量) 的 delHead+append / prepend+delTail，不命中
       // 回退整段 inner。prev 序列按容器 id 记忆（≤32 容器防内存）
       if (!window.__xyKids) window.__xyKids = new Map();
+      const xyNormH = (arr) => { let h = 0; const s = arr.join(''); for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return h; }; // v0.89: 基线指纹
       for (const it of list) {
         try {
           const ref = (it.key !== undefined && String(it.key)[0] === '#') ? Number(String(it.key).slice(1)) : it.path;
@@ -2433,9 +2438,10 @@ async function runSession(ws, req, lifecycle) {
             }
             if (shift > 0) {
               const tail = kids.slice(prev.length - shift).join('');
+              const ph = xyNormH(prev); // v0.89: 携带服务端认定的客户端子元素基线指纹
               window.__xyKids.set(kidsKey, kidsN);
-              if (tail) out2.push({ id: typeof ref === 'number' ? ref : undefined, path: it.path, delHead: shift, append: tail });
-              else out2.push({ id: typeof ref === 'number' ? ref : undefined, path: it.path, delHead: shift });
+              if (tail) out2.push({ id: typeof ref === 'number' ? ref : undefined, path: it.path, delHead: shift, append: tail, ph });
+              else out2.push({ id: typeof ref === 'number' ? ref : undefined, path: it.path, delHead: shift, ph });
               continue;
             }
             // 上移检测：new 尾段 ≡ old[0..len-k)
@@ -2445,9 +2451,10 @@ async function runSession(ws, req, lifecycle) {
             }
             if (shift2 > 0) {
               const head = kids.slice(0, shift2).join('');
+              const ph = xyNormH(prev); // v0.89
               window.__xyKids.set(kidsKey, kidsN);
-              if (head) out2.push({ id: typeof ref === 'number' ? ref : undefined, path: it.path, prepend: head, delTail: shift2 });
-              else out2.push({ id: typeof ref === 'number' ? ref : undefined, path: it.path, delTail: shift2 });
+              if (head) out2.push({ id: typeof ref === 'number' ? ref : undefined, path: it.path, prepend: head, delTail: shift2, ph });
+              else out2.push({ id: typeof ref === 'number' ? ref : undefined, path: it.path, delTail: shift2, ph });
               continue;
             }
             // v0.24 LCS 子序列编辑脚本（kidKeep/kidIns）：覆盖窗口边界与混合
@@ -2479,7 +2486,7 @@ async function runSession(ws, req, lifecycle) {
               const innerLen = cl.innerHTML.length;
               if (keepIdx.length >= 2 && encSize < innerLen * 0.7) {
                 window.__xyKids.set(kidsKey, kidsN);
-                out2.push({ id: typeof ref === 'number' ? ref : undefined, path: it.path, kidKeep: keepIdx, kidIns: insOps, kidTotal: m2 });
+                out2.push({ id: typeof ref === 'number' ? ref : undefined, path: it.path, kidKeep: keepIdx, kidIns: insOps, kidTotal: m2, ph: xyNormH(prev) }); // v0.89
                 continue;
               }
             }
@@ -2506,7 +2513,7 @@ async function runSession(ws, req, lifecycle) {
       return true;
     });
     if (!out2.length) return;
-    const payload = JSON.stringify({ type: 'dom-patches', patches: out2 });
+    const payload = JSON.stringify({ type: 'dom-patches', patches: out2, ep: snapEpoch }); // v0.89: 携带时栅
     ws.send(payload);
     ws._bytes = (ws._bytes || 0) + payload.length;
     ws._chunks = (ws._chunks || 0) + 1;
