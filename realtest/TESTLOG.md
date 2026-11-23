@@ -440,40 +440,6 @@
 
 ---
 
-## 第 20 轮(续):REQUEST_ALLOWED_ORIGINS 语义断裂修复——遗留图片 404 根治
-
-- **发现链**: 直通 @import 修复实测中——REQUEST_ALLOWED_ORIGINS=beekka 配置下
-  遗留 2 张图仍被拦/403; 快照却稳定 154ms×3(对比此前 10-22s, 白名单化后
-  挂起消失——PR #75 根因链"被拦资源致 DOM 持续变化"的直接实证)。
-- **语义断裂(根因)**: REQUEST_ALLOWED_ORIGINS 只进页面请求拦截白名单
-  (policy/navOrigins); 三处资产面缺失:
-  ① /m/o/ 资产代理的 origin 检查(ORIGIN_ALLOWED||dynamicOrigins)
-  ② 直通改写薄壳 allowedHas 同缺
-  ③ warm 预热期拦截器(takeover 前的牺牲请求, 时序性)
-- **修复**: createRequestPolicy(config.requestOrigins) 建 policy 对象(含
-  通配 suffix)→ ① /m/o/ origin 检查 + ② 薄壳 allowedHas 均扩展
-  requestAllowed(o+'/', requestPolicyObj); ③ 属预热时序(页面加载后
-  懒加载图片走会话拦截器已放行)。
-- **红绿**: 遗留图1 200/1441B ✓ 图2 200/6392B ✓(此前 403); evil 域
-  403 ✓ 白名单外 google 403 ✓(安全边界完好); css-proxy-rewrite 8/8;
-  全量 90/90; check 通过。
-- **批次 3 遗留(ruanyifeng 图 404×2)至此根治闭环。**
-
----
-
-## 第 21 轮(续):canvas 像素级功能验证——v0.82 修复实证 + 指令流重放确认
-
-- **静态画布**(画一次即停, v0.82"首镜像重建后恒空白"修复的回归判定):
-  镜像端 getImageData 像素分析——红 2800 + 蓝 6000 像素(源站红蓝矩形
-  完整重现)✓——恒空白回归未发生。
-- **动态画布**(60ms 持续重绘): 指令流重放后全帧红色 ✓(源站 6 位色值
-  系列fillRect 忠实重现; 首轮全黑为探针源站 5 位 hex 非法色值——镜像
-  忠实反映源站行为的副证)。
-- 结论: canvas 2D 指令流管线(v0.82 flush 具名化 + v0.83 离屏豁免后)
-  内容级渲染正确; 直通模式共存无干扰。
-
----
-
 ## 第 22 轮:FONT_ALIGN 部分失效根因修复(重大)——中文场景字体对齐首次完整生效
 
 - **发现**(canvas 验证延伸): FONT_ALIGN=true 下镜像 css 的 t1(Microsoft
