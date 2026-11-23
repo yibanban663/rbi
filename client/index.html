@@ -38,6 +38,7 @@
   body.prod #navWrap:hover, body.prod #navHot:hover ~ #navWrap { transform: none; box-shadow: 0 2px 10px rgba(0,0,0,.35); }
   body.prod #navHot { position: fixed; top:0; left:0; right:0; height: 9px; z-index:89; }
   body.prod #mirrorScroll { width: 100vw !important; height: 100vh !important; }
+  #mirrorFrame { width: 100%; height: 100%; border: 0; display: block; background: transparent; }
   /* v0.35.1 三闪修复：镜像容器内联 #fff 在 prod 全屏下是一块白板——在 html 注入
      底色与内容上屏之间盖出第二记白闪（全帧率实测 629ms 帧）。透明透出注入底色 */
   body.prod #mirrorScroll { background: transparent !important; }
@@ -108,8 +109,8 @@
       <div class="cursor" id="cur"></div>
     </div>
     <div class="canvas-box" id="mirrorBox" style="display:none">
-      <div id="mirrorScroll" style="width:1280px;height:800px;overflow:auto;background:#fff">
-        <div id="mirrorHost"></div>
+      <div id="mirrorScroll" style="width:1280px;height:800px;overflow:hidden;background:#fff">
+        <iframe id="mirrorFrame" title="mirror" sandbox="allow-same-origin" referrerpolicy="no-referrer"></iframe>
       </div>
     </div>
     <div class="stage-hint" id="stageHint">
@@ -845,6 +846,9 @@
 // scrollbar-width:thin}，shadow 内规则够不到外层滚动器）。从 .xy-body 计算样式
 // 取值写到 #mirrorScroll，对任何站点通用；'auto' 也照写（与源站计算值恒等）。
 function syncDocScrollerStyle() {
+  // 镜像已是 iframe 内的真实文档，滚动条、color-scheme、overscroll 由源站
+  // html/body 规则直接作用在这个文档上。再抄到外层 #mirrorScroll 会变成第二套滚动器。
+  return;
   try {
     const ms = document.getElementById('mirrorScroll');
     if (!ms || !mirrorBody) return;
@@ -896,7 +900,7 @@ function hoistImportFonts(css) {
   return new Promise((res) => {
     let cssText = '';
     let pending = 0, done = false;
-    const finish = () => { if (!done) { done = true; try { if (cssText && mirrorRoot) { let st = mirrorRoot.getElementById('xy-import-fonts'); if (!st) { st = document.createElement('style'); st.id = 'xy-import-fonts'; mirrorRoot.appendChild(st); } if (st.textContent !== cssText) st.textContent = cssText; } } catch (e) {} res(); } };
+    const finish = () => { if (!done) { done = true; try { const rootDoc = (mirrorRoot && mirrorRoot.head) ? mirrorRoot : null; if (cssText && rootDoc) { let st = rootDoc.getElementById('xy-import-fonts'); if (!st) { st = rootDoc.createElement('style'); st.id = 'xy-import-fonts'; rootDoc.head.appendChild(st); } if (st.textContent !== cssText) st.textContent = cssText; } } catch (e) {} res(); } };
     try {
       const urls = [];
       const re = /@import\s+url\((['"]?)([^'")]+)\1\)\s*;/g;
@@ -1003,19 +1007,42 @@ async function replayGlOps(st, ops, reset) {
   } finally { st.busy = false; }
 }
 
+function ensureMirrorDoc() {
+  const frame = document.getElementById('mirrorFrame');
+  if (!frame) return null;
+  const doc = frame.contentDocument;
+  if (!doc || !doc.documentElement || !doc.head || !doc.body) return null;
+  mirrorRoot = doc;
+  return doc;
+}
+function applyMirrorRoot(doc, docClass, docAttrs) {
+  const html = doc.documentElement;
+  const probe = document.createElement('div');
+  probe.innerHTML = '<div ' + (docAttrs || '') + '></div>';
+  const src = probe.firstElementChild;
+  if (src) {
+    for (const at of [...html.attributes]) if (at.name !== 'class') html.removeAttribute(at.name);
+    for (const at of [...src.attributes]) html.setAttribute(at.name, at.value);
+  }
+  html.className = docClass || '';
+}
+function installMirrorStyles(doc, css) {
+  const CSS_SEG = '\n\u002f' + '*' + '__xy_css_segment_v76__' + '*' + '\u002f\n';
+  const segs = String(css || '').split(CSS_SEG);
+  for (const st of [...doc.head.querySelectorAll('style[data-xy-page]')]) st.remove();
+  for (const s of segs) {
+    const st = doc.createElement('style');
+    st.setAttribute('data-xy-page', '1');
+    st.textContent = s;
+    doc.head.appendChild(st);
+  }
+}
 function buildMirror(css, html, docClass, docAttrs, newBodyId, bodyStyle) {
-    const host = document.getElementById('mirrorHost');
-    if (!host.shadowRoot) mirrorRoot = host.attachShadow({ mode: 'open' });
-    else mirrorRoot = host.shadowRoot;
-    // 选择器映射：:root/html/body（含复合选择器 html[data-theme]、html.foo 等）→ .xy-body
-    // （Shadow DOM 内 :root/html 匹配不到镜像根；复合形式不映射则按属性切换的主题全部失配，
-    // 实测受保护站点 data-theme 亮色变量整组失效、输入框白底变暗——踩过）
-    // 纵深：css 为 null/undefined（任何缓存回退漏网路径）按空样式表处理，
-    // 不得抛错中断整树重建（同上：导航回流冻结根因的兜底防线）
-    const css2 = (css || '')
-      .replace(/:root(?=[\[{.,:\s)])/g, '.xy-body')
-      .replace(/(^|[\s,{}>+~])html(?=[\[{.,:\s)])/g, '$1.xy-body')
-      .replace(/(^|[\s,{}>+~])body(?=[\[{.,:\s)])/g, '$1.xy-body');
+    const doc = ensureMirrorDoc();
+    if (!doc) return;
+    // 镜像是无脚本 iframe 里的真实文档。html/:root/body、position:fixed、100vh
+    // 按源站样式生效，不再塞进 position:relative 的 .xy-body。
+    const css2 = css || '';
     // 像素瓦片模式：镜像内零文字明文 → 客户端无需任何字体下发（省 16MB），
     // 所有可见文字/图表 = 服务端按本机 DPR 渲染的原始像素瓦片，1:1 显示
     // html/body 的类与属性（主题载体）挂到镜像根上
@@ -1044,9 +1071,8 @@ function buildMirror(css, html, docClass, docAttrs, newBodyId, bodyStyle) {
     // 序列都会被剥除：v0.76 的分段 split 字面量自上线起就被剥成永不匹配的
     // 空壳（直通模式 13 段连成一条样式表，@import 不在段首全被 CSS 解析器
     // 丢弃，裸样式保真 0 16 → 重同步循环——Vikunja 直通回归失败的根因）
-    const CSS_SEG = '\n\u002f' + '*' + '__xy_css_segment_v76__' + '*' + '\u002f\n';
-    const segs = String(css2).split(CSS_SEG);    const cssTags = segs.length > 1 ? segs.map((s) => '<style>' + s + '</style>').join('') : ('<style>' + css2 + '</style>');
-    const mirrorHtml = cssTags + '<div class="xy-body ' + (docClass || '') + '" ' + (docAttrs || '') + ' style="min-height:100%;box-sizing:border-box;position:relative">' + html + '</div>';
+    installMirrorStyles(doc, css2);
+    applyMirrorRoot(doc, docClass, docAttrs);
     // v0.71 @property 提升注册：CSS Houdini @property 在 shadow 作用域不被 Chromium
     // 注册（tailwind v4 全站使用）——未注册的自定义属性无初始值，var() 链在
     // computed-value 时失效：bg-gradient-to-r 的 --tw-gradient-stops 整条断链
@@ -1064,13 +1090,10 @@ function buildMirror(css, html, docClass, docAttrs, newBodyId, bodyStyle) {
     // v0.14：innerHTML 已不解析声明式 Shadow DOM（Chrome 提示需 setHTMLUnsafe）；
     // 影子树由 <template shadowrootmode> 重建。旧浏览器回退 innerHTML（无影子镜像）
     // v0.40 F4 纵深：快照整页同样过 parseHtml 的惰性预清洗（服务端 sanitize 为第一道）
-    const safeHtml = scrubHtml(mirrorHtml);
-    if (typeof mirrorRoot.setHTMLUnsafe === 'function') mirrorRoot.setHTMLUnsafe(safeHtml);
-    else mirrorRoot.innerHTML = safeHtml;
-
-
-
-    mirrorBody = mirrorRoot.querySelector('.xy-body');
+    const safeHtml = scrubHtml(html || '');
+    if (typeof doc.body.setHTMLUnsafe === 'function') doc.body.setHTMLUnsafe(safeHtml);
+    else doc.body.innerHTML = safeHtml;
+    mirrorBody = doc.body;
     // v0.64 导航乐观转场：start 于镜像内 a/form 点击；done 于 location/快照
     // 回流/nav-blocked；8s 超时强制结束（防永久挂起）
     const navBar = document.getElementById('navProgress');
@@ -1364,6 +1387,15 @@ function buildMirror(css, html, docClass, docAttrs, newBodyId, bodyStyle) {
       {
         let lastInAt = 0;
         mirrorRoot.addEventListener('scroll', (e) => {
+          if (frameMode || e.target !== mirrorRoot || !mirrorRoot.scrollingElement) return;
+          const se = mirrorRoot.scrollingElement;
+          if (se.__xySync) return;
+          const nowDoc = Date.now();
+          if (nowDoc - lastInAt < 40) return;
+          lastInAt = nowDoc;
+          send({ type: 'scroll', x: Math.round(se.scrollLeft), y: Math.round(se.scrollTop) });
+        }, true);
+        mirrorRoot.addEventListener('scroll', (e) => {
           if (frameMode) return; // frame：内部滚动由服务端差分回传
           const t = realTarget(e);
           if (!t || t.nodeType !== 1 || t.scrollTop === undefined) return;
@@ -1525,6 +1557,8 @@ function buildMirror(css, html, docClass, docAttrs, newBodyId, bodyStyle) {
       };
       document.addEventListener('keydown', (e) => keyForward(e, true), true);
       document.addEventListener('keyup', (e) => keyForward(e, false), true);
+      mirrorRoot.addEventListener('keydown', (e) => keyForward(e, true), true);
+      mirrorRoot.addEventListener('keyup', (e) => keyForward(e, false), true);
       mirrorRoot.addEventListener('mouseleave', () => { closeLocalHole(); }, true);
       // 滚轮转发（根治内层容器滚动失效）：真实应用多为 100vh 布局 + 内层
       // overflow 容器，页面级 scroll 同步永远不触发。wheel 直接送服务端
@@ -1717,94 +1751,17 @@ function buildMirror(css, html, docClass, docAttrs, newBodyId, bodyStyle) {
     while (srcParent.firstChild) el.appendChild(srcParent.firstChild);
     registerSubtree(el);
   }
-  // v0.95 FLIP 布局过渡：布局模式切换（欢迎态居中 → 控制台态底栏）是 flex 布局
-  // 位置变化，CSS transition 无法插值 → 镜像里表现为"瞬移/乱动"（实测输入框
-  // 60ms→120ms 跳 354px，源站用 mt-settle-down keyframes 平滑）。在补丁前后各记
-  // 一次位置，对位移显著且仍存活的元素做 transform 反偏移再动画归零（FLIP）。
-  function flipCapture() {
-    const out = new Map();
-    try {
-      if (!mirrorBody) return out;
-      const vw = window.innerWidth, vh = window.innerHeight;
-      let n = 0;
-      for (const el of mirrorBody.querySelectorAll('[data-xy-id]')) {
-        if (n >= 400) break;
-        const r = el.getBoundingClientRect();
-        if (r.width < 4 || r.height < 4) continue;
-        if (r.bottom < -200 || r.top > vh + 200) continue;
-        const id = el.getAttribute('data-xy-id');
-        if (!id) continue;
-        out.set(id, { x: r.left, y: r.top, w: r.width });
-        n++;
-      }
-    } catch (e) {}
-    return out;
-  }
-  function flipPlay(prev, scrollDY) {
-    try {
-      if (!mirrorBody || !prev || !prev.size) return;
-      const vh = window.innerHeight;
-      let n = 0;
-      for (const el of mirrorBody.querySelectorAll('[data-xy-id]')) {
-        if (n >= 200) break;
-        const id = el.getAttribute('data-xy-id');
-        const p0 = id && prev.get(id);
-        if (!p0) continue;
-        if (el.tagName === 'CANVAS' || el.tagName === 'IMG' || el.tagName === 'VIDEO') continue;
-        const r = el.getBoundingClientRect();
-        if (r.width < 4 || r.height < 4) continue;
-        if (r.bottom < -100 || r.top > vh + 100) continue;
-        let dx = p0.x - r.left;
-        let dy = p0.y - r.top + (scrollDY || 0);
-        if (Math.abs(dx) < 4 && Math.abs(dy) < 4) continue;
-        if (Math.abs(dx) > 900 || Math.abs(dy) > 900) continue; // 页面切换级位移不做（避免全页飞入）
-        const keepTf = el.style.transform;
-        el.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
-        el.style.willChange = 'transform';
-        requestAnimationFrame(() => {
-          el.style.transition = 'transform 200ms cubic-bezier(.2,.8,.2,1)';
-          el.style.transform = keepTf || '';
-          const done = () => {
-            el.style.transition = '';
-            el.style.willChange = '';
-            if (keepTf) el.style.transform = keepTf;
-          };
-          el.addEventListener('transitionend', done, { once: true });
-          setTimeout(done, 320);
-        });
-        n++;
-      }
-    } catch (e) {}
-  }
   function morphMirror(css, html, docClass, docAttrs, newBodyId, bodyStyle) {
     try {
-      if (!mirrorRoot || !mirrorBody) return false;
+      if (!mirrorRoot || !mirrorBody || !mirrorRoot.head) return false;
       const holder = document.createElement('div');
-      const wrapped = '<div class="xy-body ' + (docClass || '') + '" ' + (docAttrs || '') + '>' + html + '</div>';
-      if (typeof holder.setHTMLUnsafe === 'function') holder.setHTMLUnsafe(wrapped); else holder.innerHTML = wrapped;
-      const nb = holder.firstElementChild;
-      if (!nb) return false;
-      // 样式段更新（样式不参与过渡，整段替换）
-      if (css != null) {
-        try {
-          const CSS_SEG = '\n\u002f' + '*' + '__xy_css_segment_v76__' + '*' + '\u002f\n';
-          const css2 = String(css)
-            .replace(/:root(?=[\[{.,:\s)])/g, '.xy-body')
-            .replace(/(^|[\s,{}>+~])html(?=[\[{.,:\s)])/g, '$1.xy-body')
-            .replace(/(^|[\s,{}>+~])body(?=[\[{.,:\s)])/g, '$1.xy-body');
-          const segs = css2.split(CSS_SEG);
-          const tags = segs.length > 1 ? segs.map((s) => '<style>' + s + '</style>').join('') : ('<style>' + css2 + '</style>');
-          for (const st of [...mirrorRoot.querySelectorAll(':scope > style')]) st.remove();
-          const tmp = document.createElement('div');
-          tmp.innerHTML = tags;
-          while (tmp.firstChild) mirrorRoot.insertBefore(tmp.firstChild, mirrorRoot.firstChild);
-        } catch (eCss) {}
-      }
-      morphNode(mirrorBody, nb);
-      mirrorBody.className = nb.className;
-      if (bodyStyle) { try { mirrorBody.style.cssText = nb.style.cssText + ';' + bodyStyle; } catch (eS) {} }
+      const clean = scrubHtml(html || '');
+      if (typeof holder.setHTMLUnsafe === 'function') holder.setHTMLUnsafe(clean); else holder.innerHTML = clean;
+      if (css != null) installMirrorStyles(mirrorRoot, css);
+      applyMirrorRoot(mirrorRoot, docClass, docAttrs);
+      morphChildrenInto(mirrorBody, holder);
+      if (bodyStyle) { try { mirrorBody.style.cssText = bodyStyle; } catch (eS) {} }
       if (typeof newBodyId === 'number' && Number.isFinite(newBodyId)) { bodyId = newBodyId; mirrorIds.set(newBodyId, mirrorBody); }
-      syncDocScrollerStyle();
       return true;
     } catch (e) { return false; }
   }
@@ -1924,9 +1881,6 @@ function buildMirror(css, html, docClass, docAttrs, newBodyId, bodyStyle) {
   }
   function applyPatches(patches, noRepair) {
     if (!mirrorBody) return;
-    // v0.95：布局过渡补偿——记录前态（含滚动位置，回放时扣除滚动位移）
-    let flipPrev = null, flipSY0 = 0;
-    try { const msF = document.getElementById('mirrorScroll'); flipSY0 = msF ? msF.scrollTop : 0; flipPrev = flipCapture(); } catch (eF) {}
     const dpr = window.devicePixelRatio || 1;
     let batchMiss = 0;
     const rebound = [];
@@ -2167,14 +2121,6 @@ el.style.color = 'transparent'; el.style.textShadow = 'none';
         if (el2 && el2.focus && mirrorRoot.activeElement !== el2) el2.focus();
       } catch (e) {}
     }
-    // v0.95：差异回放（下一帧，避免与本次 DOM 变更同帧）
-    if (flipPrev && flipPrev.size) {
-      try {
-        const msF2 = document.getElementById('mirrorScroll');
-        const dy = (msF2 ? msF2.scrollTop : 0) - flipSY0;
-        requestAnimationFrame(() => flipPlay(flipPrev, dy));
-      } catch (eF2) {}
-    }
     noteFrame(0);
   }
 
@@ -2324,8 +2270,7 @@ el.style.color = 'transparent'; el.style.textShadow = 'none';
               try {
                 document.documentElement.style.setProperty('background', j.bg, 'important');
                 document.body.style.setProperty('background', j.bg, 'important');
-                const mb = document.querySelector('#mirrorHost') && document.querySelector('#mirrorHost').shadowRoot && document.querySelector('#mirrorHost').shadowRoot.getElementById('mirrorBody');
-                if (mb) mb.style.setProperty('background', j.bg, 'important');
+                if (mirrorBody) mirrorBody.style.setProperty('background', j.bg, 'important');
                 // v0.59：滚动容器一并修正——其内联 #fff 在内容不满屏/非白底源站
                 // 的大片留白区露出（实测 static 图表页右侧/底部源站米白 vs 镜像纯白）
                 const msEl = document.getElementById('mirrorScroll');
@@ -2729,8 +2674,7 @@ el.style.color = 'transparent'; el.style.textShadow = 'none';
             try {
               document.documentElement.style.setProperty('background', j.bg, 'important');
               document.body.style.setProperty('background', j.bg, 'important');
-              const mb = document.querySelector('#mirrorHost') && document.querySelector('#mirrorHost').shadowRoot && document.querySelector('#mirrorHost').shadowRoot.getElementById('mirrorBody');
-              if (mb) mb.style.setProperty('background', j.bg, 'important');
+              if (mirrorBody) mirrorBody.style.setProperty('background', j.bg, 'important');
             } catch (e) {}
           }
           try { if (j.type === 'nav-blocked') navProgressDone(); } catch (e) {}
@@ -2739,9 +2683,9 @@ el.style.color = 'transparent'; el.style.textShadow = 'none';
             setStatus('目标不在允许范围', false);
             setTimeout(() => { if (lastErr === (j.msg || '导航被拒绝')) { lastErr = ''; setStatus('会话在线', true); } }, 2600);
           }
-          if (j.type === 'doc-class' && mirrorBody) {
-            // 主题/状态类切换：直改镜像根类名（轻量，不重建）
-            mirrorBody.className = 'xy-body ' + (j.cls || '');
+          if (j.type === 'doc-class' && mirrorRoot && mirrorRoot.documentElement) {
+            // 主题/状态类在真实 html 元素上，选择器 html.xxx / :root 才能命中
+            mirrorRoot.documentElement.className = j.cls || '';
             // v0.60：暗色主题等类切换常伴随滚动条配色变化，随之重取
             syncDocScrollerStyle();
           }

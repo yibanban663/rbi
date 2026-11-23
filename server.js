@@ -372,8 +372,7 @@ function unproxyAsset(u) {
 // v0.76 样式表直通配套：css 文件以原始字节经 /m(/m/o) 下发，其中指向白名单
 // 源站的绝对 URL 必须改写回代理形态（否则访客端直连内网源站必败）；相对
 // URL 不动——浏览器按 css 文件自身地址（代理命名空间内）解析，天然正确。
-// html/:root/body 选择子映射同步在此承担（镜像根是 .xy-body div，原选择子
-// 在 shadow 内匹配不到——与客户端内联段同款映射，保持两路径一致）。
+// 镜像文档在无脚本 iframe 内，html/:root/body 不再改写。
 function absToProxy(u) {
   if (!/^https?:\/\//i.test(String(u))) return null;
   try {
@@ -396,12 +395,7 @@ function cssProxyRewrite(cssText) {
     const p = absToProxy(u);
     return p ? '@import ' + q + p + q : whole;
   });
-  // html/:root/body → .xy-body（与客户端 buildMirror 的映射同款，作用于
-  // 独立下发的样式表字节）
-  out = out
-    .replace(/:root(?=[\[{.,:\s)])/g, '.xy-body')
-    .replace(/(^|[\s,{}>+~])html(?=[\[{.,:\s)])/g, '$1.xy-body')
-    .replace(/(^|[\s,{}>+~])body(?=[\[{.,:\s)])/g, '$1.xy-body');
+  // 镜像是 iframe 里的真实文档，html/:root/body 按源站选择器生效，不再改写成 .xy-body。
   // v0.84 直通字体栈对齐：v0.76 直通遗漏了内联路径的 FONT_ALIGN（v0.35）——
   // 原始字节里的本地字体名（system-ui/Segoe UI/微软雅黑…）在客户端按访客机器
   // 解析、服务端按容器 fontconfig 解析，物理字体不同 → 排版度量漂移 → 保真
