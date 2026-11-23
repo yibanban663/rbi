@@ -373,6 +373,8 @@ function unproxyAsset(u) {
 // 源站的绝对 URL 必须改写回代理形态（否则访客端直连内网源站必败）；相对
 // URL 不动——浏览器按 css 文件自身地址（代理命名空间内）解析，天然正确。
 // 镜像文档在无脚本 iframe 内，html/:root/body 不再改写。
+
+
 function absToProxy(u) {
   if (!/^https?:\/\//i.test(String(u))) return null;
   try {
@@ -382,27 +384,9 @@ function absToProxy(u) {
     return '/m/o/' + Buffer.from(x.origin).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') + x.pathname + x.search;
   } catch (e) { return null; }
 }
-function cssProxyRewrite(cssText) {
-  let out = String(cssText).replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/g, (whole, q, u) => {
-    const p = absToProxy(u);
-    return p ? 'url(' + q + p + q + ')' : whole;
-  });
-  out = out.replace(/(image-set\(|-webkit-image-set\()\s*(['"])([^'"]+)\2/g, (whole, fn, q, u) => {
-    const p = absToProxy(u);
-    return p ? fn + ' ' + q + p + q : whole;
-  });
-  out = out.replace(/@import\s+(?!url\()(['"])([^'"]+)\1/g, (whole, q, u) => {
-    const p = absToProxy(u);
-    return p ? '@import ' + q + p + q : whole;
-  });
-  // 镜像是 iframe 里的真实文档，html/:root/body 按源站选择器生效，不再改写成 .xy-body。
-  // v0.84 直通字体栈对齐：v0.76 直通遗漏了内联路径的 FONT_ALIGN（v0.35）——
-  // 原始字节里的本地字体名（system-ui/Segoe UI/微软雅黑…）在客户端按访客机器
-  // 解析、服务端按容器 fontconfig 解析，物理字体不同 → 排版度量漂移 → 保真
-  // 锚点失配（Vikunja 实测 3/19）→ 观测模式 15s 重同步死循环、镜像反复重建，
-  // 业务回归（create 后等 /m/projects 链接）超时。与内联路径同款替换 + 同款
-  // Noto @font-face 注入（重复声明无害，浏览器按 URL 去重）
-  if (config.fontAlign === true) {
+function cssProxyRewrite(cssText, cssBase) {
+  let out = cssProxyRewritePure(cssText, cssBase, ORIGIN_BASE.origin, (o) => ORIGIN_ALLOWED.has(o) || dynamicOrigins.has(o));
+if (config.fontAlign === true) {
     const LOCAL_FONTS = 'PingFang SC|Hiragino Sans GB|Microsoft YaHei|微软雅黑|SimHei|黑体|SimSun|宋体|KaiTi|楷体|Source Han Sans SC|思源黑体|Source Han Serif SC|Noto Sans CJK SC|Noto Serif CJK SC|WenQuanYi[a-zA-Z ]*|Heiti SC|STHeiti|LiHei Pro|SF Pro (?:Text|Display)|Helvetica Neue|Segoe UI|Roboto|Ubuntu|Cantarell|system-ui|apple-system|BlinkMacSystemFont';
     const famRe = new RegExp('(["\']?)(' + LOCAL_FONTS + ')\\1', 'i');
     out = out.replace(/font-family\s*:\s*([^;}]+)/gi, (m0, list) => {
@@ -530,7 +514,7 @@ function proxyAsset(req, res) {
         }
         let body = Buffer.concat(chunks);
         // v0.76：css 响应改写后再入库/下发（缓存里存改写后形态，命中零成本）
-        if (/^text\/css/.test(ct)) { try { body = Buffer.from(cssProxyRewrite(body.toString('utf8'))); } catch (e) {} }
+        if (/^text\/css/.test(ct)) { try { body = Buffer.from(cssProxyRewrite(body.toString('utf8'), u)); } catch (e) {} }
         originAssetCache.put(cacheKey, { status: up.statusCode || 200, headers: up.headers, body });
         if (!res.headersSent) {
           res.writeHead(up.statusCode || 200, {
@@ -550,7 +534,7 @@ function proxyAsset(req, res) {
       up.on('data', (c) => chunks2.push(c));
       up.on('end', () => {
         let b2 = Buffer.concat(chunks2);
-        try { b2 = Buffer.from(cssProxyRewrite(b2.toString('utf8'))); } catch (e) {}
+        try { b2 = Buffer.from(cssProxyRewrite(b2.toString('utf8'), u)); } catch (e) {}
         res.end(b2);
       });
       up.on('error', () => res.destroy());
@@ -3589,4 +3573,36 @@ function close() {
 return { handleRequest, handleUpgrade, revokeSession, revokeIdentity, close };
 }
 
-module.exports = { createMirror };
+function cssProxyRewritePure(cssText, cssBase, originBase, allowedHas) {
+  const ob = new URL(originBase).origin; // 规范化: 防调用方传带尾斜杠/路径的值
+  const resolveToProxy = (u) => {
+    // 排除集对齐页内 toProxyUrl: 内联引用(fragment)/数据/协议化 URI 不走代理;
+    // 已改写的 /m/ 路径不再二次改写(幂等, 防 /m/m/ 病态)
+    if (/^(data:|blob:|#|mailto:|tel:|javascript:|about:|\/m\/)/i.test(String(u))) return null;
+    try {
+      const x = new URL(String(u), cssBase || undefined);
+      if (!['http:', 'https:'].includes(x.protocol) || x.username || x.password) return null;
+      if (x.origin === ob) return '/m' + x.pathname + x.search;
+      if (allowedHas(x.origin)) {
+        return '/m/o/' + Buffer.from(x.origin).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') + x.pathname + x.search;
+      }
+      return null;
+    } catch (e) { return null; }
+  };
+  let out = String(cssText).replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/g, (whole, q, u) => {
+    const p = resolveToProxy(u);
+    return p ? 'url(' + q + p + q + ')' : whole;
+  });
+  out = out.replace(/(image-set\(|-webkit-image-set\()\s*(['"])([^'"]+)\2/g, (whole, fn, q, u) => {
+    const p = resolveToProxy(u);
+    return p ? fn + ' ' + q + p + q : whole;
+  });
+  out = out.replace(/@import\s+(?!url\()(['"])([^'"]+)\1/g, (whole, q, u) => {
+    const p = resolveToProxy(u);
+    return p ? '@import ' + q + p + q : whole;
+  });
+  out = out
+  return out;
+}
+
+module.exports = { createMirror, cssProxyRewritePure };
